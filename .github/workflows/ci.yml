@@ -1,0 +1,79 @@
+name: Churn Prediction CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Check code style
+        run: |
+          pip install ruff
+          ruff check src/ dashboard/
+
+  model-quality-gate:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download dataset
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          mkdir -p data
+          kaggle datasets download -d blastchar/telco-customer-churn -p data/ --unzip
+
+      - name: Train and evaluate
+        run: |
+          cd src
+          python -c "
+          import sys; sys.path.insert(0, '.')
+          from data_loader import load_pipeline
+          from train import train_all, get_metrics_table
+
+          X, y, _ = load_pipeline()
+          results, _, _ = train_all(X, y)
+          table = get_metrics_table(results)
+          print(table)
+
+          # Quality gate: best model must hit AUC >= 0.84
+          best_auc = table['roc_auc'].max()
+          print(f'Best AUC: {best_auc:.4f}')
+          assert best_auc >= 0.84, f'Quality gate failed: AUC {best_auc:.4f} < 0.84'
+          print('Quality gate PASSED')
+          "
+
+      - name: Upload MLflow artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: mlflow-runs
+          path: mlruns/
